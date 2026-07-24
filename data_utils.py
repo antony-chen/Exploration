@@ -134,6 +134,33 @@ def kl_loss(mu_z, logvar_z):
     return -0.5 * torch.mean(1 + logvar_z - mu_z.pow(2) - logvar_z.exp())
 
 
+def build_predictions_table(records, profile_name: str) -> pd.DataFrame:
+    """Hourly decoder predictions vs. actual load for the forecast (decoder) window.
+
+    Shared by every Plot_*_reverseweek.py script. Each record must provide
+    'dec_start', 'forecast_true', 'forecast_mu', 'forecast_sigma', 'week', 'split'.
+    """
+    rows = []
+    for rec in records:
+        timestamps = pd.date_range(rec["dec_start"], periods=len(rec["forecast_true"]), freq="h")
+        for h, ts in enumerate(timestamps):
+            actual = float(rec["forecast_true"][h])
+            predicted = float(rec["forecast_mu"][h])
+            rows.append({
+                "profile": profile_name,
+                "week": rec["week"],
+                "split": rec["split"],
+                "timestamp": ts,
+                "horizon_hour": h,
+                "actual_load": actual,
+                "predicted_load": predicted,
+                "predicted_sigma": float(rec["forecast_sigma"][h]),
+                "error": predicted - actual,
+                "abs_error": abs(predicted - actual),
+            })
+    return pd.DataFrame(rows)
+
+
 def process_seq2seq_data(
         feature_dict,
         *,

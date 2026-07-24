@@ -15,6 +15,7 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from sklearn.preprocessing import MinMaxScaler
 
+from data_utils import build_predictions_table
 from Main_24hr_GRU_reverseweek import (
     Config,
     FORECAST_INDICES,
@@ -282,29 +283,6 @@ def _nice_load_ylim(month_records: List[Dict]) -> Tuple[float, float]:
     reference = max(abs(vmin), abs(vmax), 1.0)
     pad = max(0.08 * span, 0.015 * reference)
     return vmin - pad, vmax + pad
-
-
-def build_predictions_table(records: List[Dict], profile_name: str) -> pd.DataFrame:
-    """Hourly decoder predictions vs. actual load for the forecast (decoder) window."""
-    rows = []
-    for rec in records:
-        timestamps = pd.date_range(rec["dec_start"], periods=len(rec["forecast_true"]), freq="h")
-        for h, ts in enumerate(timestamps):
-            actual = float(rec["forecast_true"][h])
-            predicted = float(rec["forecast_mu"][h])
-            rows.append({
-                "profile": profile_name,
-                "week": rec["week"],
-                "split": rec["split"],
-                "timestamp": ts,
-                "horizon_hour": h,
-                "actual_load": actual,
-                "predicted_load": predicted,
-                "predicted_sigma": float(rec["forecast_sigma"][h]),
-                "error": predicted - actual,
-                "abs_error": abs(predicted - actual),
-            })
-    return pd.DataFrame(rows)
 
 
 def plot_month(records: List[Dict], month: int, out_path: Path, profile_name: str, checkpoint_name: str, global_ylim: Tuple[float, float] | None = None):
