@@ -161,6 +161,107 @@ def build_predictions_table(records, profile_name: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# Matches run directory names such as "24hr_gru_reverseweek" or "168hr_mlp_reverseweek",
+# as produced by ONCOR_RUN_NAME defaults in the Main_*_reverseweek.py scripts.
+_RUN_NAME_RE = re.compile(r"^(?P<horizon>\d+hr)_(?P<model>[a-zA-Z0-9]+)_reverseweek$")
+
+
+def _parse_run_name(run_name: str) -> Tuple[str, str]:
+    m = _RUN_NAME_RE.match(run_name)
+    if not m:
+        raise ValueError(
+            f"Cannot infer horizon/model from run directory name '{run_name}'; "
+            "expected a pattern like '24hr_gru_reverseweek'."
+        )
+    return m.group("horizon"), m.group("model").upper()
+
+
+def discover_run_dirs(output_root) -> List[Path]:
+    """Find run directories directly under an ONCOR_OUTPUT_ROOT that match the
+    '<horizon>_<model>_reverseweek' naming convention (e.g. '24hr_gru_reverseweek')."""
+    output_root = Path(output_root)
+    return sorted(p for p in output_root.iterdir() if p.is_dir() and _RUN_NAME_RE.match(p.name))
+
+
+def load_run_predictions(run_dir, checkpoint_name: str = "mse", year: Optional[int] = None) -> pd.DataFrame:
+    """Concatenate the monthly '*_predictions.csv' tables (written by the
+    Plot_*_reverseweek.py scripts) for a single run directory."""
+    plot_dir = Path(run_dir) / f"year_monthly_hist_forecast_plots_{checkpoint_name}"
+    pattern = (
+        f"*_{checkpoint_name}_predictions.csv"
+        if year is None
+        else f"*_{year}_month*_{checkpoint_name}_predictions.csv"
+    )
+    csv_paths = sorted(plot_dir.glob(pattern))
+    if not csv_paths:
+        raise FileNotFoundError(
+            f"No prediction CSVs found in {plot_dir} (checkpoint={checkpoint_name}, year={year})"
+        )
+    return pd.concat(
+        (pd.read_csv(p, parse_dates=["timestamp"]) for p in csv_paths),
+        ignore_index=True,
+    )
+
+
+def best_model_by_horizon_device(
+    run_dirs,
+    checkpoint_name: str = "mse",
+    metric: str = "rmse",
+    year: Optional[int] = None,
+) -> pd.DataFrame:
+    """Compare models sharing the same forecast horizon and device, and report the winner.
+
+    Reads each run's monthly predictions CSVs (via load_run_predictions), computes
+    RMSE/MAE per device (the 'profile' column) from actual vs. predicted load, then
+    for every (horizon, device) pair marks the model with the lowest `metric` as best.
+
+    run_dirs: run directories such as '.../24hr_gru_reverseweek', '.../24hr_mlp_reverseweek',
+    '.../168hr_gru_reverseweek', '.../168hr_mlp_reverseweek' — the horizon and model name
+    are inferred from each directory's name. Use discover_run_dirs() to gather them
+    automatically from an ONCOR_OUTPUT_ROOT.
+
+    Returns a leaderboard DataFrame with one row per (horizon, model, device), sorted so
+    the best model for each (horizon, device) pair appears first, with an 'is_best' flag.
+    """
+    if metric not in ("rmse", "mae"):
+        raise ValueError("metric must be 'rmse' or 'mae'")
+
+    rows = []
+    for run_dir in run_dirs:
+        run_dir = Path(run_dir)
+        horizon, model = _parse_run_name(run_dir.name)
+        table = load_run_predictions(run_dir, checkpoint_name, year)
+        for device, group in table.groupby("profile"):
+            err = group["predicted_load"] - group["actual_load"]
+            rows.append({
+                "horizon": horizon,
+                "model": model,
+                "device": device,
+                "rmse": float(np.sqrt(np.mean(err ** 2))),
+                "mae": float(np.mean(np.abs(err))),
+                "n_points": int(len(group)),
+                "run_dir": str(run_dir),
+            })
+
+    leaderboard = pd.DataFrame(rows)
+    if leaderboard.empty:
+        return leaderboard
+
+    leaderboard = leaderboard.sort_values(["horizon", "device", metric]).reset_index(drop=True)
+    leaderboard["is_best"] = False
+    best_idx = leaderboard.groupby(["horizon", "device"])[metric].idxmin()
+    leaderboard.loc[best_idx, "is_best"] = True
+
+    for (horizon, device), group in leaderboard.groupby(["horizon", "device"]):
+        winner = group.loc[group["is_best"]].iloc[0]
+        print(
+            f"[BEST] horizon={horizon} device={device}: model={winner['model']} "
+            f"({metric}={winner[metric]:.4f}, n={winner['n_points']})"
+        )
+
+    return leaderboard
+
+
 def process_seq2seq_data(
         feature_dict,
         *,
