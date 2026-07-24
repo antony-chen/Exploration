@@ -258,6 +258,29 @@ def _nice_load_ylim(month_records: List[Dict]) -> Tuple[float, float]:
     return lo, hi
 
 
+def build_predictions_table(records: List[Dict], profile_name: str) -> pd.DataFrame:
+    """Hourly decoder predictions vs. actual load for the forecast (decoder) window."""
+    rows = []
+    for rec in records:
+        timestamps = pd.date_range(rec["dec_start"], periods=len(rec["forecast_true"]), freq="h")
+        for h, ts in enumerate(timestamps):
+            actual = float(rec["forecast_true"][h])
+            predicted = float(rec["forecast_mu"][h])
+            rows.append({
+                "profile": profile_name,
+                "week": rec["week"],
+                "split": rec["split"],
+                "timestamp": ts,
+                "horizon_hour": h,
+                "actual_load": actual,
+                "predicted_load": predicted,
+                "predicted_sigma": float(rec["forecast_sigma"][h]),
+                "error": predicted - actual,
+                "abs_error": abs(predicted - actual),
+            })
+    return pd.DataFrame(rows)
+
+
 def plot_month(records: List[Dict], month: int, out_path: Path, profile_name: str, checkpoint_name: str, global_ylim: Tuple[float, float] | None = None):
     n = len(records)
     if n == 0:
@@ -406,15 +429,21 @@ def main():
         recs = sorted(recs, key=lambda r: pd.Timestamp(r["dec_start"]))
         out_path = OUTPUT_DIR / f"{plot_profile}_{TARGET_YEAR}_month{month:02d}_{CHECKPOINT_NAME}_probabilistic.png"
         plot_month(recs, month, out_path, plot_profile, CHECKPOINT_NAME, global_ylim=global_ylim)
+
+        table_path = OUTPUT_DIR / f"{plot_profile}_{TARGET_YEAR}_month{month:02d}_{CHECKPOINT_NAME}_predictions.csv"
+        build_predictions_table(recs, plot_profile).to_csv(table_path, index=False)
+
         summary_rows.append({
             "month": month,
             "weeks_in_figure": len(recs),
             "file": str(out_path),
+            "predictions_file": str(table_path),
             "first_decoder_start": str(recs[0]["dec_start"]),
             "last_decoder_start": str(recs[-1]["dec_start"]),
             "split_labels": ",".join(sorted({r['split'] for r in recs})),
         })
         print(f"[SAVED] {out_path}")
+        print(f"[SAVED] {table_path}")
 
     pd.DataFrame(summary_rows).to_csv(
         OUTPUT_DIR / f"{plot_profile}_{TARGET_YEAR}_{CHECKPOINT_NAME}_monthly_manifest.csv",
