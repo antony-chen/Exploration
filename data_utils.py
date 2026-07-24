@@ -134,6 +134,19 @@ def kl_loss(mu_z, logvar_z):
     return -0.5 * torch.mean(1 + logvar_z - mu_z.pow(2) - logvar_z.exp())
 
 
+def display_png_in_notebook(path) -> None:
+    """Show a saved PNG inline when running inside a Jupyter/IPython kernel; no-op otherwise
+    (e.g. plain `python script.py`, where there is no rich display to render into)."""
+    try:
+        from IPython import get_ipython
+        from IPython.display import display, Image
+    except ImportError:
+        return
+    if get_ipython() is None:
+        return
+    display(Image(filename=str(path)))
+
+
 def build_predictions_table(records, profile_name: str) -> pd.DataFrame:
     """Hourly decoder predictions vs. actual load for the forecast (decoder) window.
 

@@ -14,7 +14,7 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from sklearn.preprocessing import MinMaxScaler
 
-from data_utils import build_predictions_table
+from data_utils import build_predictions_table, display_png_in_notebook
 from Main_168hr_MLP_reverseweek import (
     Config,
     PROJECT_ROOT,
@@ -344,6 +344,7 @@ def plot_month(records: List[Dict], month: int, out_path: Path, profile_name: st
     )
     fig.savefig(out_path, dpi=FIG_DPI, bbox_inches="tight")
     plt.close(fig)
+    display_png_in_notebook(out_path)
 
 
 def main():
