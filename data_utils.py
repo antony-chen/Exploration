@@ -136,7 +136,11 @@ def kl_loss(mu_z, logvar_z):
 
 def display_png_in_notebook(path) -> None:
     """Show a saved PNG inline when running inside a Jupyter/IPython kernel; no-op otherwise
-    (e.g. plain `python script.py`, where there is no rich display to render into)."""
+    (e.g. plain `python script.py`, where there is no rich display to render into).
+
+    Best-effort only: a failure here (e.g. Jupyter's IOPub rate/size limits choking on a
+    large image) must never abort the calling plot loop, so any error is caught and logged.
+    """
     try:
         from IPython import get_ipython
         from IPython.display import display, Image
@@ -144,7 +148,10 @@ def display_png_in_notebook(path) -> None:
         return
     if get_ipython() is None:
         return
-    display(Image(filename=str(path)))
+    try:
+        display(Image(filename=str(path)))
+    except Exception as exc:
+        print(f"[WARN] Could not display {path} inline: {exc}")
 
 
 def build_predictions_table(records, profile_name: str) -> pd.DataFrame:
