@@ -226,14 +226,15 @@ def load_run_predictions(run_dir, checkpoint_name: str = "mse", year: Optional[i
 def best_model_by_horizon_device(
     run_dirs,
     checkpoint_name: str = "mse",
-    metric: str = "rmse",
     year: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Compare models sharing the same forecast horizon and device, and report the winner.
+    """Rank models sharing the same forecast horizon and device by combined RMSE+MAE.
 
     Reads each run's monthly predictions CSVs (via load_run_predictions), computes
-    RMSE/MAE per device (the 'profile' column) from actual vs. predicted load, then
-    for every (horizon, device) pair marks the model with the lowest `metric` as best.
+    RMSE and MAE per device (the 'profile' column) from actual vs. predicted load,
+    combines them into a single score, and ranks every model within each
+    (horizon, device) group by that score (both RMSE and MAE are in load units,
+    so a plain average is directly comparable — no normalization needed).
 
     run_dirs: run directories such as '.../24hr_gru_reverseweek', '.../24hr_mlp_reverseweek',
     '.../168hr_gru_reverseweek', '.../168hr_mlp_reverseweek' — the horizon and model name
@@ -241,11 +242,10 @@ def best_model_by_horizon_device(
     automatically from an ONCOR_OUTPUT_ROOT.
 
     Returns a leaderboard DataFrame with one row per (horizon, model, device), sorted so
-    the best model for each (horizon, device) pair appears first, with an 'is_best' flag.
+    rank 1 (lowest combined_score) appears first within each (horizon, device) group.
+    'rank' is 1-indexed standing within that group; 'n_models' is how many models were
+    found with forecasts for that device (at that horizon), i.e. the group size.
     """
-    if metric not in ("rmse", "mae"):
-        raise ValueError("metric must be 'rmse' or 'mae'")
-
     rows = []
     for run_dir in run_dirs:
         run_dir = Path(run_dir)
@@ -253,12 +253,15 @@ def best_model_by_horizon_device(
         table = load_run_predictions(run_dir, checkpoint_name, year)
         for device, group in table.groupby("profile"):
             err = group["predicted_load"] - group["actual_load"]
+            rmse = float(np.sqrt(np.mean(err ** 2)))
+            mae = float(np.mean(np.abs(err)))
             rows.append({
                 "horizon": horizon,
                 "model": model,
                 "device": device,
-                "rmse": float(np.sqrt(np.mean(err ** 2))),
-                "mae": float(np.mean(np.abs(err))),
+                "rmse": rmse,
+                "mae": mae,
+                "combined_score": (rmse + mae) / 2.0,
                 "n_points": int(len(group)),
                 "run_dir": str(run_dir),
             })
@@ -267,16 +270,23 @@ def best_model_by_horizon_device(
     if leaderboard.empty:
         return leaderboard
 
-    leaderboard = leaderboard.sort_values(["horizon", "device", metric]).reset_index(drop=True)
-    leaderboard["is_best"] = False
-    best_idx = leaderboard.groupby(["horizon", "device"])[metric].idxmin()
-    leaderboard.loc[best_idx, "is_best"] = True
+    grouped = leaderboard.groupby(["horizon", "device"])["combined_score"]
+    leaderboard["rank"] = grouped.rank(method="min").astype(int)
+    leaderboard["n_models"] = grouped.transform("size")
+
+    leaderboard = leaderboard.sort_values(
+        ["horizon", "device", "rank"]
+    ).reset_index(drop=True)
 
     for (horizon, device), group in leaderboard.groupby(["horizon", "device"]):
-        winner = group.loc[group["is_best"]].iloc[0]
+        ordered = group.sort_values("rank")
+        ranking = ", ".join(
+            f"#{row.rank} {row.model}(combined={row.combined_score:.4f})"
+            for row in ordered.itertuples()
+        )
         print(
-            f"[BEST] horizon={horizon} device={device}: model={winner['model']} "
-            f"({metric}={winner[metric]:.4f}, n={winner['n_points']})"
+            f"[RANKED] horizon={horizon} device={device} "
+            f"n_models={ordered['n_models'].iloc[0]}: {ranking}"
         )
 
     return leaderboard
