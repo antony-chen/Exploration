@@ -256,29 +256,18 @@ def _compute_monthly_scores(run_dirs, checkpoint_name: str = "mse", year: Option
     return pd.DataFrame(rows)
 
 
-def summarize_by_horizon(monthly: pd.DataFrame) -> pd.DataFrame:
-    """Per-(horizon, model) summary across devices, each device weighing in with all its data.
-
-    Where best_model_by_device's leaderboard compares models against each other on one
-    device for one month, this rolls models up across every device found for a
-    (horizon, model) — first collapsing each device's own rows down to a single
-    whole-year rmse/mae (pooling every month of data available for that device, so a
-    device with more months on record doesn't implicitly outweigh one with fewer),
-    then summarizing (mean/median/std/min/max of combined_score, plus mean rmse/mae)
-    those per-device scores across devices.
+def _aggregate_full_year(monthly: pd.DataFrame) -> pd.DataFrame:
+    """Collapse a per-(month, horizon, model, device) table to one row per
+    (horizon, model, device), pooling every month of that device's data together.
 
     rmse/mae are quadratic/linear means respectively, so they can't just be averaged
     across months directly — each device's whole-year rmse/mae is reconstructed from
     the monthly rmse/mae weighted by each month's point count (n_points), which is
     mathematically equivalent to computing it from the raw per-hour errors directly.
-
-    monthly: the shared per-(month, horizon, model, device) table from
-    _compute_monthly_scores() — typically the same one best_model_by_device already
-    built, passed in to avoid re-reading the underlying CSVs.
+    Shared by best_model_by_device (for per-model ranking) and summarize_by_horizon
+    (for cross-device rollups), so devices with more months on record never implicitly
+    outweigh ones with fewer.
     """
-    if monthly.empty:
-        return monthly.copy()
-
     weighted = monthly.assign(
         _weighted_mse=monthly["rmse"] ** 2 * monthly["n_points"],
         _weighted_mae=monthly["mae"] * monthly["n_points"],
@@ -291,6 +280,27 @@ def summarize_by_horizon(monthly: pd.DataFrame) -> pd.DataFrame:
     per_device["rmse"] = np.sqrt(per_device["_sum_weighted_mse"] / per_device["n_points"])
     per_device["mae"] = per_device["_sum_weighted_mae"] / per_device["n_points"]
     per_device["combined_score"] = (per_device["rmse"] + per_device["mae"]) / 2.0
+    return per_device.drop(columns=["_sum_weighted_mse", "_sum_weighted_mae"])
+
+
+def summarize_by_horizon(monthly: pd.DataFrame) -> pd.DataFrame:
+    """Per-(horizon, model) summary across devices, each device weighing in with all its data.
+
+    Where best_model_by_device's leaderboard compares models against each other on one
+    device for one month, this rolls models up across every device found for a
+    (horizon, model) — using each device's whole-year combined_score (from
+    _aggregate_full_year) so a device with more months on record doesn't implicitly
+    outweigh one with fewer — then summarizing (mean/median/std/min/max of
+    combined_score, plus mean rmse/mae) those per-device scores across devices.
+
+    monthly: the shared per-(month, horizon, model, device) table from
+    _compute_monthly_scores() — typically the same one best_model_by_device already
+    built, passed in to avoid re-reading the underlying CSVs.
+    """
+    if monthly.empty:
+        return monthly.copy()
+
+    per_device = _aggregate_full_year(monthly)
 
     summary = per_device.groupby(["horizon", "model"]).agg(
         n_devices=("device", "nunique"),
@@ -323,12 +333,15 @@ def best_model_by_device(
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Rank every model with forecasts for a device by combined RMSE+MAE, per month.
 
-    Builds the shared per-(month, horizon, model, device) table (_compute_monthly_scores)
-    and ranks every model against every other model found for that device — regardless
-    of forecast horizon, architecture, or month (both RMSE and MAE are in load units, so
-    a plain average is directly comparable — no normalization needed). Month stays on
-    each row as data (rmse/mae are still scored per calendar month, not blended across
-    the year), it just isn't used to group or sort anything.
+    Builds the shared per-(month, horizon, model, device) table (_compute_monthly_scores),
+    then ranks each *model's whole-year performance* (via _aggregate_full_year) against
+    every other model found for that device — regardless of forecast horizon or
+    architecture (both RMSE and MAE are in load units, so a plain average is directly
+    comparable — no normalization needed). Ranking a model on its full-year aggregate
+    rather than on individual monthly rows keeps 'rank' bounded by 'n_models' instead of
+    by the number of (model, month) forecast instances. Month stays on each leaderboard
+    row as data (rmse/mae are still scored per calendar month, not blended across the
+    year), it just isn't used to group, sort, or rank anything.
 
     run_dirs: run directories such as '.../24hr_gru_reverseweek', '.../24hr_mlp_reverseweek',
     '.../168hr_gru_reverseweek', '.../168hr_mlp_reverseweek' — the horizon and model name
@@ -338,10 +351,14 @@ def best_model_by_device(
 
     Returns (leaderboard, model_summary):
       - leaderboard: one row per (month, horizon, model, device), sorted by ascending
-        combined_score. 'rank' is the 1-indexed standing among all models found for
-        that device (pooled across every month); 'n_models' is how many distinct
-        models were found with forecasts for that device, i.e. a count of distinct
-        model names, not of rows (a model contributes one row per month).
+        (per-row, per-month) combined_score. 'rank' and 'n_models' are computed from
+        each model's whole-year combined_score for that device (via
+        _aggregate_full_year), not from individual monthly rows — so 'rank' is always
+        between 1 and 'n_models' inclusive, the same value repeated across every
+        month a given (device, model) contributes a row for. 'n_models' is how many
+        distinct (model, horizon) combinations were found with forecasts for that
+        device — a model name like 'GRU' is reused across horizons, so it counts
+        GRU/24hr and GRU/168hr as two separate competitors, not one.
       - model_summary: from summarize_by_horizon() — one row per (horizon, model),
         aggregated across every device's full year of available data; see that
         function's docstring.
@@ -350,11 +367,20 @@ def best_model_by_device(
     if monthly.empty:
         return monthly, monthly.copy()
 
-    leaderboard = monthly.copy()
-    device_groups = leaderboard.groupby("device")
-    leaderboard["rank"] = device_groups["combined_score"].rank(method="min").astype(int)
-    leaderboard["n_models"] = device_groups["model"].transform("nunique")
+    per_device_model = _aggregate_full_year(monthly)
+    # A model name like "GRU" is reused across horizons, so distinguish competitors
+    # by (model, horizon) — otherwise GRU/24hr and GRU/168hr would collapse into one
+    # when counting, even though they're ranked as separate entries below.
+    model_key = per_device_model["model"] + "/" + per_device_model["horizon"]
+    device_groups = per_device_model.groupby("device")
+    per_device_model["rank"] = device_groups["combined_score"].rank(method="min").astype(int)
+    per_device_model["n_models"] = model_key.groupby(per_device_model["device"]).transform("nunique")
 
+    leaderboard = monthly.merge(
+        per_device_model[["horizon", "model", "device", "rank", "n_models"]],
+        on=["horizon", "model", "device"],
+        how="left",
+    )
     leaderboard = leaderboard.sort_values("combined_score").reset_index(drop=True)
 
     for row in leaderboard.itertuples():
