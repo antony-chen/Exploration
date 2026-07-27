@@ -223,28 +223,30 @@ def load_run_predictions(run_dir, checkpoint_name: str = "mse", year: Optional[i
     )
 
 
-def best_model_by_horizon_device(
+def best_model_by_device(
     run_dirs,
     checkpoint_name: str = "mse",
     year: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Rank models sharing the same forecast horizon and device by combined RMSE+MAE.
+    """Rank every model with forecasts for a device by combined RMSE+MAE.
 
     Reads each run's monthly predictions CSVs (via load_run_predictions), computes
     RMSE and MAE per device (the 'profile' column) from actual vs. predicted load,
-    combines them into a single score, and ranks every model within each
-    (horizon, device) group by that score (both RMSE and MAE are in load units,
-    so a plain average is directly comparable — no normalization needed).
+    combines them into a single score, and ranks every model against every other
+    model found for that device — regardless of forecast horizon or architecture
+    (both RMSE and MAE are in load units, so a plain average is directly
+    comparable — no normalization needed).
 
     run_dirs: run directories such as '.../24hr_gru_reverseweek', '.../24hr_mlp_reverseweek',
     '.../168hr_gru_reverseweek', '.../168hr_mlp_reverseweek' — the horizon and model name
-    are inferred from each directory's name. Use discover_run_dirs() to gather them
+    are inferred from each directory's name (kept as an informational 'horizon' column,
+    but not part of the ranking group). Use discover_run_dirs() to gather them
     automatically from an ONCOR_OUTPUT_ROOT.
 
     Returns a leaderboard DataFrame with one row per (horizon, model, device), sorted so
-    rank 1 (lowest combined_score) appears first within each (horizon, device) group.
-    'rank' is 1-indexed standing within that group; 'n_models' is how many models were
-    found with forecasts for that device (at that horizon), i.e. the group size.
+    rank 1 (lowest combined_score) appears first within each device group. 'rank' is the
+    1-indexed standing among all models found for that device; 'n_models' is how many
+    distinct models were found with forecasts for that device, i.e. the group size.
     """
     rows = []
     for run_dir in run_dirs:
@@ -270,22 +272,20 @@ def best_model_by_horizon_device(
     if leaderboard.empty:
         return leaderboard
 
-    grouped = leaderboard.groupby(["horizon", "device"])["combined_score"]
+    grouped = leaderboard.groupby("device")["combined_score"]
     leaderboard["rank"] = grouped.rank(method="min").astype(int)
     leaderboard["n_models"] = grouped.transform("size")
 
-    leaderboard = leaderboard.sort_values(
-        ["horizon", "device", "rank"]
-    ).reset_index(drop=True)
+    leaderboard = leaderboard.sort_values(["device", "rank"]).reset_index(drop=True)
 
-    for (horizon, device), group in leaderboard.groupby(["horizon", "device"]):
+    for device, group in leaderboard.groupby("device"):
         ordered = group.sort_values("rank")
         ranking = ", ".join(
-            f"#{row.rank} {row.model}(combined={row.combined_score:.4f})"
+            f"#{row.rank} {row.model}/{row.horizon}(combined={row.combined_score:.4f})"
             for row in ordered.itertuples()
         )
         print(
-            f"[RANKED] horizon={horizon} device={device} "
+            f"[RANKED] device={device} "
             f"n_models={ordered['n_models'].iloc[0]}: {ranking}"
         )
 
