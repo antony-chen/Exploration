@@ -237,11 +237,49 @@ def load_run_predictions(run_dir, checkpoint_name: str = "mse", year: Optional[i
     return pd.concat(frames, ignore_index=True)
 
 
+def summarize_by_month_horizon(leaderboard: pd.DataFrame) -> pd.DataFrame:
+    """Roll up a best_model_by_device() leaderboard across devices, per (month, horizon, model).
+
+    Where the leaderboard answers "how did each model compare to its peers on this one
+    device", this answers "how did this model do overall this month, across every device
+    it had forecasts for" — summary statistics (mean/median/std/min/max of combined_score,
+    plus mean rmse/mae) of the per-device rows found for that (month, horizon, model).
+
+    Returns one row per (month, horizon, model), sorted by ascending combined_score_mean
+    across the whole table (not clustered by month, matching best_model_by_device).
+    """
+    if leaderboard.empty:
+        return leaderboard.copy()
+
+    summary = leaderboard.groupby(["month", "horizon", "model"]).agg(
+        n_devices=("device", "nunique"),
+        combined_score_mean=("combined_score", "mean"),
+        combined_score_median=("combined_score", "median"),
+        combined_score_std=("combined_score", "std"),
+        combined_score_min=("combined_score", "min"),
+        combined_score_max=("combined_score", "max"),
+        rmse_mean=("rmse", "mean"),
+        mae_mean=("mae", "mean"),
+    ).reset_index()
+
+    summary = summary.sort_values("combined_score_mean").reset_index(drop=True)
+
+    for row in summary.itertuples():
+        print(
+            f"[MODEL-MONTH] month={row.month:02d} model={row.model}/{row.horizon} "
+            f"n_devices={row.n_devices} combined_mean={row.combined_score_mean:.4f} "
+            f"(median={row.combined_score_median:.4f}, min={row.combined_score_min:.4f}, "
+            f"max={row.combined_score_max:.4f})"
+        )
+
+    return summary
+
+
 def best_model_by_device(
     run_dirs,
     checkpoint_name: str = "mse",
     year: Optional[int] = None,
-) -> pd.DataFrame:
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Rank every model with forecasts for a device by combined RMSE+MAE, per month.
 
     Reads each run's monthly predictions CSVs (via load_run_predictions), computes
@@ -258,11 +296,15 @@ def best_model_by_device(
     but not part of the ranking group). Use discover_run_dirs() to gather them
     automatically from an ONCOR_OUTPUT_ROOT.
 
-    Returns a leaderboard DataFrame with one row per (month, horizon, model, device),
-    sorted by ascending combined_score across the whole table (not clustered by month).
-    'rank' is the 1-indexed standing among all models found for that device in that
-    month; 'n_models' is how many distinct models were found with forecasts for that
-    device in that month, i.e. the group size.
+    Returns (leaderboard, model_month_summary):
+      - leaderboard: one row per (month, horizon, model, device), sorted by ascending
+        combined_score across the whole table (not clustered by month). 'rank' is the
+        1-indexed standing among all models found for that device in that month;
+        'n_models' is how many distinct models were found with forecasts for that
+        device in that month, i.e. the group size.
+      - model_month_summary: from summarize_by_month_horizon() — one row per
+        (month, horizon, model), summarizing combined_score/rmse/mae across every
+        device found for that model in that month.
     """
     rows = []
     for run_dir in run_dirs:
@@ -287,7 +329,7 @@ def best_model_by_device(
 
     leaderboard = pd.DataFrame(rows)
     if leaderboard.empty:
-        return leaderboard
+        return leaderboard, leaderboard.copy()
 
     grouped = leaderboard.groupby(["device", "month"])["combined_score"]
     leaderboard["rank"] = grouped.rank(method="min").astype(int)
@@ -301,7 +343,9 @@ def best_model_by_device(
             f"rank={row.rank}/{row.n_models} combined={row.combined_score:.4f}"
         )
 
-    return leaderboard
+    model_month_summary = summarize_by_month_horizon(leaderboard)
+
+    return leaderboard, model_month_summary
 
 
 def process_seq2seq_data(
