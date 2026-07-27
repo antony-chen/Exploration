@@ -259,10 +259,10 @@ def best_model_by_device(
     automatically from an ONCOR_OUTPUT_ROOT.
 
     Returns a leaderboard DataFrame with one row per (month, horizon, model, device),
-    sorted by month and then ascending combined_score. 'rank' is the 1-indexed standing
-    among all models found for that device in that month; 'n_models' is how many
-    distinct models were found with forecasts for that device in that month, i.e. the
-    group size.
+    sorted by ascending combined_score across the whole table (not clustered by month).
+    'rank' is the 1-indexed standing among all models found for that device in that
+    month; 'n_models' is how many distinct models were found with forecasts for that
+    device in that month, i.e. the group size.
     """
     rows = []
     for run_dir in run_dirs:
@@ -293,17 +293,12 @@ def best_model_by_device(
     leaderboard["rank"] = grouped.rank(method="min").astype(int)
     leaderboard["n_models"] = grouped.transform("size")
 
-    leaderboard = leaderboard.sort_values(["month", "combined_score"]).reset_index(drop=True)
+    leaderboard = leaderboard.sort_values("combined_score").reset_index(drop=True)
 
-    for (device, month), group in leaderboard.groupby(["device", "month"]):
-        ordered = group.sort_values("rank")
-        ranking = ", ".join(
-            f"#{row.rank} {row.model}/{row.horizon}(combined={row.combined_score:.4f})"
-            for row in ordered.itertuples()
-        )
+    for row in leaderboard.itertuples():
         print(
-            f"[RANKED] device={device} month={month:02d} "
-            f"n_models={ordered['n_models'].iloc[0]}: {ranking}"
+            f"[RANKED] device={row.device} month={row.month:02d} model={row.model}/{row.horizon} "
+            f"rank={row.rank}/{row.n_models} combined={row.combined_score:.4f}"
         )
 
     return leaderboard
