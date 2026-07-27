@@ -411,6 +411,14 @@ def summarize_device(leaderboard: pd.DataFrame, device: str) -> pd.DataFrame:
     Returns one row per (horizon, model) that had forecasts for that device, sorted by
     rank ascending (rank 1 = best).
     """
+    if not isinstance(leaderboard, pd.DataFrame):
+        raise TypeError(
+            "leaderboard must be a DataFrame, got "
+            f"{type(leaderboard).__name__}. best_model_by_device() returns a "
+            "(leaderboard, model_summary) tuple -- did you forget to unpack it? "
+            "Use: leaderboard, summary = best_model_by_device(...)"
+        )
+
     device_rows = leaderboard[leaderboard["device"] == device]
     if device_rows.empty:
         raise ValueError(f"No forecasts found for device={device!r} in this leaderboard")
