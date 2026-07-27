@@ -284,7 +284,9 @@ def best_model_by_device(
       - leaderboard: one row per (horizon, model, device), sorted by ascending
         combined_score. 'rank' is the 1-indexed standing among all models found for
         that device; 'n_models' is how many distinct models were found with forecasts
-        for that device, i.e. the group size.
+        for that device, i.e. the group size. 'months' is a purely informational,
+        comma-separated list of the calendar months whose data went into that row's
+        rmse/mae (derived from each row's own timestamps) — it is never a grouping key.
       - model_summary: from summarize_by_horizon() — one row per (horizon, model),
         summarizing combined_score/rmse/mae across every device found for that model.
     """
@@ -297,6 +299,7 @@ def best_model_by_device(
             err = group["predicted_load"] - group["actual_load"]
             rmse = float(np.sqrt(np.mean(err ** 2)))
             mae = float(np.mean(np.abs(err)))
+            months = sorted(int(m) for m in group["timestamp"].dt.month.unique())
             rows.append({
                 "horizon": horizon,
                 "model": model,
@@ -305,6 +308,7 @@ def best_model_by_device(
                 "mae": mae,
                 "combined_score": (rmse + mae) / 2.0,
                 "n_points": int(len(group)),
+                "months": ",".join(f"{m:02d}" for m in months),
                 "run_dir": str(run_dir),
             })
 
