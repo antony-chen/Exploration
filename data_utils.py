@@ -203,9 +203,21 @@ def discover_run_dirs(output_root) -> List[Path]:
     return sorted(p for p in output_root.iterdir() if p.is_dir() and _RUN_NAME_RE.match(p.name))
 
 
+_MONTH_FROM_FILENAME_RE = re.compile(r"_month(\d{2})_")
+
+
+def _extract_month(csv_path) -> int:
+    m = _MONTH_FROM_FILENAME_RE.search(Path(csv_path).name)
+    if not m:
+        raise ValueError(f"Cannot infer month from predictions filename: {csv_path}")
+    return int(m.group(1))
+
+
 def load_run_predictions(run_dir, checkpoint_name: str = "mse", year: Optional[int] = None) -> pd.DataFrame:
     """Concatenate the monthly '*_predictions.csv' tables (written by the
-    Plot_*_reverseweek.py scripts) for a single run directory."""
+    Plot_*_reverseweek.py scripts) for a single run directory, tagging each row
+    with the calendar 'month' its source file was written for (so callers can
+    keep months separate instead of aggregating the whole year together)."""
     plot_dir = Path(run_dir) / f"year_monthly_hist_forecast_plots_{checkpoint_name}"
     pattern = (
         f"*_{checkpoint_name}_predictions.csv"
@@ -217,10 +229,12 @@ def load_run_predictions(run_dir, checkpoint_name: str = "mse", year: Optional[i
         raise FileNotFoundError(
             f"No prediction CSVs found in {plot_dir} (checkpoint={checkpoint_name}, year={year})"
         )
-    return pd.concat(
-        (pd.read_csv(p, parse_dates=["timestamp"]) for p in csv_paths),
-        ignore_index=True,
-    )
+    frames = []
+    for p in csv_paths:
+        df = pd.read_csv(p, parse_dates=["timestamp"])
+        df["month"] = _extract_month(p)
+        frames.append(df)
+    return pd.concat(frames, ignore_index=True)
 
 
 def best_model_by_device(
@@ -228,14 +242,15 @@ def best_model_by_device(
     checkpoint_name: str = "mse",
     year: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Rank every model with forecasts for a device by combined RMSE+MAE.
+    """Rank every model with forecasts for a device by combined RMSE+MAE, per month.
 
     Reads each run's monthly predictions CSVs (via load_run_predictions), computes
-    RMSE and MAE per device (the 'profile' column) from actual vs. predicted load,
-    combines them into a single score, and ranks every model against every other
-    model found for that device — regardless of forecast horizon or architecture
+    RMSE and MAE per (device, month) from actual vs. predicted load, combines them
+    into a single score, and ranks every model against every other model found for
+    that device in that month — regardless of forecast horizon or architecture
     (both RMSE and MAE are in load units, so a plain average is directly
-    comparable — no normalization needed).
+    comparable — no normalization needed). Months are kept separate rather than
+    aggregated across the whole year, since accuracy can vary a lot by season.
 
     run_dirs: run directories such as '.../24hr_gru_reverseweek', '.../24hr_mlp_reverseweek',
     '.../168hr_gru_reverseweek', '.../168hr_mlp_reverseweek' — the horizon and model name
@@ -243,21 +258,23 @@ def best_model_by_device(
     but not part of the ranking group). Use discover_run_dirs() to gather them
     automatically from an ONCOR_OUTPUT_ROOT.
 
-    Returns a leaderboard DataFrame with one row per (horizon, model, device), sorted so
-    rank 1 (lowest combined_score) appears first within each device group. 'rank' is the
-    1-indexed standing among all models found for that device; 'n_models' is how many
-    distinct models were found with forecasts for that device, i.e. the group size.
+    Returns a leaderboard DataFrame with one row per (month, horizon, model, device),
+    sorted by month and then ascending combined_score. 'rank' is the 1-indexed standing
+    among all models found for that device in that month; 'n_models' is how many
+    distinct models were found with forecasts for that device in that month, i.e. the
+    group size.
     """
     rows = []
     for run_dir in run_dirs:
         run_dir = Path(run_dir)
         horizon, model = _parse_run_name(run_dir.name)
         table = load_run_predictions(run_dir, checkpoint_name, year)
-        for device, group in table.groupby("profile"):
+        for (device, month), group in table.groupby(["profile", "month"]):
             err = group["predicted_load"] - group["actual_load"]
             rmse = float(np.sqrt(np.mean(err ** 2)))
             mae = float(np.mean(np.abs(err)))
             rows.append({
+                "month": int(month),
                 "horizon": horizon,
                 "model": model,
                 "device": device,
@@ -272,20 +289,20 @@ def best_model_by_device(
     if leaderboard.empty:
         return leaderboard
 
-    grouped = leaderboard.groupby("device")["combined_score"]
+    grouped = leaderboard.groupby(["device", "month"])["combined_score"]
     leaderboard["rank"] = grouped.rank(method="min").astype(int)
     leaderboard["n_models"] = grouped.transform("size")
 
-    leaderboard = leaderboard.sort_values(["device", "rank"]).reset_index(drop=True)
+    leaderboard = leaderboard.sort_values(["month", "combined_score"]).reset_index(drop=True)
 
-    for device, group in leaderboard.groupby("device"):
+    for (device, month), group in leaderboard.groupby(["device", "month"]):
         ordered = group.sort_values("rank")
         ranking = ", ".join(
             f"#{row.rank} {row.model}/{row.horizon}(combined={row.combined_score:.4f})"
             for row in ordered.itertuples()
         )
         print(
-            f"[RANKED] device={device} "
+            f"[RANKED] device={device} month={month:02d} "
             f"n_models={ordered['n_models'].iloc[0]}: {ranking}"
         )
 
