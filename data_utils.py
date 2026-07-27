@@ -257,17 +257,20 @@ def _compute_monthly_scores(run_dirs, checkpoint_name: str = "mse", year: Option
 
 
 def summarize_by_horizon(monthly: pd.DataFrame) -> pd.DataFrame:
-    """Per-(month, horizon, model) summary across every device, keeping months separate.
+    """Per-(horizon, model) summary across devices, each device weighing in with all its data.
 
     Where best_model_by_device's leaderboard compares models against each other on one
-    device, this rolls models up across devices — but blending e.g. January and July
-    together could hide a model's seasonal swings, so each row is still one calendar
-    month's rmse/mae stats for a (horizon, model), summarized (mean/median/std/min/max
-    of combined_score, plus mean rmse/mae) across whatever devices had forecasts that
-    month.
+    device for one month, this rolls models up across every device found for a
+    (horizon, model) — first collapsing each device's own rows down to a single
+    whole-year rmse/mae (pooling every month of data available for that device, so a
+    device with more months on record doesn't implicitly outweigh one with fewer),
+    then summarizing (mean/median/std/min/max of combined_score, plus mean rmse/mae)
+    those per-device scores across devices.
 
-    Month is not used to sort the *output* though: rows are ordered by ascending
-    combined_score_mean across the whole table, exactly like the leaderboard.
+    rmse/mae are quadratic/linear means respectively, so they can't just be averaged
+    across months directly — each device's whole-year rmse/mae is reconstructed from
+    the monthly rmse/mae weighted by each month's point count (n_points), which is
+    mathematically equivalent to computing it from the raw per-hour errors directly.
 
     monthly: the shared per-(month, horizon, model, device) table from
     _compute_monthly_scores() — typically the same one best_model_by_device already
@@ -276,7 +279,20 @@ def summarize_by_horizon(monthly: pd.DataFrame) -> pd.DataFrame:
     if monthly.empty:
         return monthly.copy()
 
-    summary = monthly.groupby(["month", "horizon", "model"]).agg(
+    weighted = monthly.assign(
+        _weighted_mse=monthly["rmse"] ** 2 * monthly["n_points"],
+        _weighted_mae=monthly["mae"] * monthly["n_points"],
+    )
+    per_device = weighted.groupby(["horizon", "model", "device"]).agg(
+        _sum_weighted_mse=("_weighted_mse", "sum"),
+        _sum_weighted_mae=("_weighted_mae", "sum"),
+        n_points=("n_points", "sum"),
+    ).reset_index()
+    per_device["rmse"] = np.sqrt(per_device["_sum_weighted_mse"] / per_device["n_points"])
+    per_device["mae"] = per_device["_sum_weighted_mae"] / per_device["n_points"]
+    per_device["combined_score"] = (per_device["rmse"] + per_device["mae"]) / 2.0
+
+    summary = per_device.groupby(["horizon", "model"]).agg(
         n_devices=("device", "nunique"),
         combined_score_mean=("combined_score", "mean"),
         combined_score_median=("combined_score", "median"),
@@ -291,7 +307,7 @@ def summarize_by_horizon(monthly: pd.DataFrame) -> pd.DataFrame:
 
     for row in summary.itertuples():
         print(
-            f"[MODEL-MONTH] month={row.month:02d} model={row.model}/{row.horizon} "
+            f"[MODEL] model={row.model}/{row.horizon} "
             f"n_devices={row.n_devices} combined_mean={row.combined_score_mean:.4f} "
             f"(median={row.combined_score_median:.4f}, min={row.combined_score_min:.4f}, "
             f"max={row.combined_score_max:.4f})"
@@ -326,8 +342,9 @@ def best_model_by_device(
         that device (pooled across every month); 'n_models' is how many distinct
         models were found with forecasts for that device, i.e. a count of distinct
         model names, not of rows (a model contributes one row per month).
-      - model_summary: from summarize_by_horizon() — one row per (month, horizon,
-        model), keeping monthly data separate; see that function's docstring.
+      - model_summary: from summarize_by_horizon() — one row per (horizon, model),
+        aggregated across every device's full year of available data; see that
+        function's docstring.
     """
     monthly = _compute_monthly_scores(run_dirs, checkpoint_name, year)
     if monthly.empty:
