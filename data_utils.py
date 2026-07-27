@@ -237,21 +237,22 @@ def load_run_predictions(run_dir, checkpoint_name: str = "mse", year: Optional[i
     return pd.concat(frames, ignore_index=True)
 
 
-def summarize_by_month_horizon(leaderboard: pd.DataFrame) -> pd.DataFrame:
-    """Roll up a best_model_by_device() leaderboard across devices, per (month, horizon, model).
+def summarize_by_horizon(leaderboard: pd.DataFrame) -> pd.DataFrame:
+    """Roll up a best_model_by_device() leaderboard across devices and months, per (horizon, model).
 
     Where the leaderboard answers "how did each model compare to its peers on this one
-    device", this answers "how did this model do overall this month, across every device
-    it had forecasts for" — summary statistics (mean/median/std/min/max of combined_score,
-    plus mean rmse/mae) of the per-device rows found for that (month, horizon, model).
+    device", this answers "how did this model do overall, across every device and every
+    month it had forecasts for" — summary statistics (mean/median/std/min/max of
+    combined_score, plus mean rmse/mae) of the per-device-per-month rows found for that
+    (horizon, model). Not grouped by month — 'month' stays on the leaderboard purely as
+    per-row data, it is never a grouping key.
 
-    Returns one row per (month, horizon, model), sorted by ascending combined_score_mean
-    across the whole table (not clustered by month, matching best_model_by_device).
+    Returns one row per (horizon, model), sorted by ascending combined_score_mean.
     """
     if leaderboard.empty:
         return leaderboard.copy()
 
-    summary = leaderboard.groupby(["month", "horizon", "model"]).agg(
+    summary = leaderboard.groupby(["horizon", "model"]).agg(
         n_devices=("device", "nunique"),
         combined_score_mean=("combined_score", "mean"),
         combined_score_median=("combined_score", "median"),
@@ -266,7 +267,7 @@ def summarize_by_month_horizon(leaderboard: pd.DataFrame) -> pd.DataFrame:
 
     for row in summary.itertuples():
         print(
-            f"[MODEL-MONTH] month={row.month:02d} model={row.model}/{row.horizon} "
+            f"[MODEL] model={row.model}/{row.horizon} "
             f"n_devices={row.n_devices} combined_mean={row.combined_score_mean:.4f} "
             f"(median={row.combined_score_median:.4f}, min={row.combined_score_min:.4f}, "
             f"max={row.combined_score_max:.4f})"
@@ -280,15 +281,14 @@ def best_model_by_device(
     checkpoint_name: str = "mse",
     year: Optional[int] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Rank every model with forecasts for a device by combined RMSE+MAE, per month.
+    """Rank every model with forecasts for a device by combined RMSE+MAE.
 
     Reads each run's monthly predictions CSVs (via load_run_predictions), computes
-    RMSE and MAE per (device, month) from actual vs. predicted load, combines them
-    into a single score, and ranks every model against every other model found for
-    that device in that month — regardless of forecast horizon or architecture
-    (both RMSE and MAE are in load units, so a plain average is directly
-    comparable — no normalization needed). Months are kept separate rather than
-    aggregated across the whole year, since accuracy can vary a lot by season.
+    RMSE and MAE per (device, month) from actual vs. predicted load — so the per-row
+    data still reflects one calendar month at a time, since blending months together
+    would hide seasonal accuracy swings. But 'month' is never used as a grouping key:
+    rank/n_models/summaries all pool every month a device or model appears in, rather
+    than being scoped to a single month.
 
     run_dirs: run directories such as '.../24hr_gru_reverseweek', '.../24hr_mlp_reverseweek',
     '.../168hr_gru_reverseweek', '.../168hr_mlp_reverseweek' — the horizon and model name
@@ -296,15 +296,14 @@ def best_model_by_device(
     but not part of the ranking group). Use discover_run_dirs() to gather them
     automatically from an ONCOR_OUTPUT_ROOT.
 
-    Returns (leaderboard, model_month_summary):
+    Returns (leaderboard, model_summary):
       - leaderboard: one row per (month, horizon, model, device), sorted by ascending
-        combined_score across the whole table (not clustered by month). 'rank' is the
-        1-indexed standing among all models found for that device in that month;
-        'n_models' is how many distinct models were found with forecasts for that
-        device in that month, i.e. the group size.
-      - model_month_summary: from summarize_by_month_horizon() — one row per
-        (month, horizon, model), summarizing combined_score/rmse/mae across every
-        device found for that model in that month.
+        combined_score. 'rank' is the 1-indexed standing among all models found for
+        that device (across every month and horizon); 'n_models' is how many distinct
+        models were found with forecasts for that device, i.e. the group size.
+      - model_summary: from summarize_by_horizon() — one row per (horizon, model),
+        summarizing combined_score/rmse/mae across every device and month found for
+        that model.
     """
     rows = []
     for run_dir in run_dirs:
@@ -331,9 +330,11 @@ def best_model_by_device(
     if leaderboard.empty:
         return leaderboard, leaderboard.copy()
 
-    grouped = leaderboard.groupby(["device", "month"])["combined_score"]
-    leaderboard["rank"] = grouped.rank(method="min").astype(int)
-    leaderboard["n_models"] = grouped.transform("size")
+    device_groups = leaderboard.groupby("device")
+    leaderboard["rank"] = device_groups["combined_score"].rank(method="min").astype(int)
+    # nunique, not size: a model can contribute multiple rows (one per month), and
+    # n_models must count distinct models, not (model, month) forecast instances.
+    leaderboard["n_models"] = device_groups["model"].transform("nunique")
 
     leaderboard = leaderboard.sort_values("combined_score").reset_index(drop=True)
 
@@ -343,9 +344,9 @@ def best_model_by_device(
             f"rank={row.rank}/{row.n_models} combined={row.combined_score:.4f}"
         )
 
-    model_month_summary = summarize_by_month_horizon(leaderboard)
+    model_summary = summarize_by_horizon(leaderboard)
 
-    return leaderboard, model_month_summary
+    return leaderboard, model_summary
 
 
 def process_seq2seq_data(
