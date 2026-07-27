@@ -394,6 +394,49 @@ def best_model_by_device(
     return leaderboard, model_summary
 
 
+def summarize_device(leaderboard: pd.DataFrame, device: str) -> pd.DataFrame:
+    """Summarize every model that forecasted for one device, and report the best one.
+
+    Filters a best_model_by_device() leaderboard down to a single device, collapses
+    each model's monthly rows into its whole-year rmse/mae/combined_score (the same
+    reconstruction _aggregate_full_year uses to rank the full leaderboard), and prints
+    a per-model breakdown plus which model ranks best for that device.
+
+    leaderboard: the DataFrame returned by best_model_by_device() (or any subset of its
+    rows with the same columns). Rank is recomputed from scratch for just this device's
+    rows rather than trusting the leaderboard's own precomputed 'rank'/'n_models'
+    columns, so this works correctly even on a filtered/partial leaderboard slice.
+    device: the device/profile name to summarize (must match the 'device' column).
+
+    Returns one row per (horizon, model) that had forecasts for that device, sorted by
+    rank ascending (rank 1 = best).
+    """
+    device_rows = leaderboard[leaderboard["device"] == device]
+    if device_rows.empty:
+        raise ValueError(f"No forecasts found for device={device!r} in this leaderboard")
+
+    per_model = _aggregate_full_year(device_rows)
+    per_model["rank"] = per_model["combined_score"].rank(method="min").astype(int)
+    per_model["n_models"] = len(per_model)
+    per_model = per_model.sort_values("rank").reset_index(drop=True)
+
+    print(f"[DEVICE] {device}: {len(per_model)} model(s) forecasted for this device")
+    for row in per_model.itertuples():
+        marker = "  <-- BEST" if row.rank == 1 else ""
+        print(
+            f"  #{row.rank} {row.model}/{row.horizon}: combined={row.combined_score:.4f} "
+            f"(rmse={row.rmse:.4f}, mae={row.mae:.4f}, n_points={row.n_points}){marker}"
+        )
+
+    best = per_model.iloc[0]
+    print(
+        f"[BEST] {device}: {best['model']}/{best['horizon']} "
+        f"(combined={best['combined_score']:.4f})"
+    )
+
+    return per_model
+
+
 def process_seq2seq_data(
         feature_dict,
         *,
