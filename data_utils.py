@@ -337,7 +337,8 @@ def plot_etth_weekly_features(times, HUFL, HULL, MUFL, MULL, LUFL, LULL, OT, wee
 
 
 def plot_timeseries_by_path4(df, value_col="value", time_col="value_time_stamp_cst",
-                              path_col="path4", ax=None, figsize=(12, 6), title=None):
+                              path_col="path4", mark_time=None, mark_label=None,
+                              ax=None, figsize=(12, 6), title=None):
     """
     Plot one line per unique `path_col` value (e.g. 3 timeseries) on a single
     graph, with `time_col` on the x-axis and `value_col` on the y-axis.
@@ -349,6 +350,11 @@ def plot_timeseries_by_path4(df, value_col="value", time_col="value_time_stamp_c
     value_col, time_col, path_col : str
         Column names for the y-axis values, x-axis timestamps, and the
         series-grouping key, respectively.
+    mark_time : str, datetime-like, or list of these, optional
+        One or more timestamps to mark on the graph with a vertical line.
+    mark_label : str or list of str, optional
+        Label(s) for the marked timestamp(s). Defaults to the timestamp
+        itself if not provided.
     ax : matplotlib.axes.Axes, optional
         Axes to draw on. A new figure/axes is created if not provided.
     figsize : tuple
@@ -369,6 +375,13 @@ def plot_timeseries_by_path4(df, value_col="value", time_col="value_time_stamp_c
     for path_value, group in df.groupby(path_col):
         group = group.sort_values(time_col)
         ax.plot(group[time_col], group[value_col], label=str(path_value))
+
+    if mark_time is not None:
+        mark_times = mark_time if isinstance(mark_time, (list, tuple)) else [mark_time]
+        mark_labels = mark_label if isinstance(mark_label, (list, tuple)) else [mark_label] * len(mark_times)
+        for mt, ml in zip(mark_times, mark_labels):
+            mt = pd.to_datetime(mt)
+            ax.axvline(mt, color="black", linestyle="--", linewidth=1.5, label=ml or str(mt))
 
     ax.set_xlabel("Time")
     ax.set_ylabel("Value")
