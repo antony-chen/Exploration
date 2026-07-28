@@ -336,6 +336,50 @@ def plot_etth_weekly_features(times, HUFL, HULL, MUFL, MULL, LUFL, LULL, OT, wee
     plt.show()
 
 
+def plot_timeseries_by_path4(df, value_col="value", time_col="value_time_stamp_cst",
+                              path_col="path4", ax=None, figsize=(12, 6), title=None):
+    """
+    Plot one line per unique `path_col` value (e.g. 3 timeseries) on a single
+    graph, with `time_col` on the x-axis and `value_col` on the y-axis.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must contain columns [value_col, time_col, path_col].
+    value_col, time_col, path_col : str
+        Column names for the y-axis values, x-axis timestamps, and the
+        series-grouping key, respectively.
+    ax : matplotlib.axes.Axes, optional
+        Axes to draw on. A new figure/axes is created if not provided.
+    figsize : tuple
+        Figure size, used only when `ax` is not provided.
+    title : str, optional
+        Plot title.
+
+    Returns
+    -------
+    matplotlib.axes.Axes
+    """
+    df = df.copy()
+    df[time_col] = pd.to_datetime(df[time_col])
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=figsize)
+
+    for path_value, group in df.groupby(path_col):
+        group = group.sort_values(time_col)
+        ax.plot(group[time_col], group[value_col], label=str(path_value))
+
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Value")
+    ax.legend(title=path_col)
+    ax.grid(alpha=0.3)
+    if title:
+        ax.set_title(title)
+
+    plt.tight_layout()
+    return ax
+
 
 # def plot_data(times, energy, temp, workday, season_feat,
 #                    alpha=0.5, lw=1.0, cmap="viridis"):
