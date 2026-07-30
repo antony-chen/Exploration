@@ -338,10 +338,16 @@ def plot_etth_weekly_features(times, HUFL, HULL, MUFL, MULL, LUFL, LULL, OT, wee
 
 def plot_timeseries_by_path4(df, value_col="value", time_col="value_time_stamp_cst",
                               path_col="path4", mark_time=None, mark_label=None,
+                              expected_phase=None, dip_window_minutes=10,
                               ax=None, figsize=(12, 6), title=None):
     """
     Plot one line per unique `path_col` value (e.g. 3 timeseries) on a single
     graph, with `time_col` on the x-axis and `value_col` on the y-axis.
+
+    For each `mark_time`, also inspects the `dip_window_minutes` immediately
+    preceding it and reports (via print) which phase shows the most
+    significant dip (peak-to-trough amplitude) in that window, compared
+    against `expected_phase`.
 
     Parameters
     ----------
@@ -355,6 +361,13 @@ def plot_timeseries_by_path4(df, value_col="value", time_col="value_time_stamp_c
     mark_label : str or list of str, optional
         Label(s) for the marked timestamp(s). Defaults to the timestamp
         itself if not provided.
+    expected_phase : optional
+        The `path_col` value expected to show the dip before `mark_time`.
+        Its dip amplitude is compared against whichever phase actually
+        shows the most significant dip.
+    dip_window_minutes : float
+        Length of the look-back window (in minutes) before each `mark_time`
+        used to detect the dip.
     ax : matplotlib.axes.Axes, optional
         Axes to draw on. A new figure/axes is created if not provided.
     figsize : tuple
@@ -372,8 +385,10 @@ def plot_timeseries_by_path4(df, value_col="value", time_col="value_time_stamp_c
     if ax is None:
         _, ax = plt.subplots(figsize=figsize)
 
+    groups = {}
     for path_value, group in df.groupby(path_col):
         group = group.sort_values(time_col)
+        groups[path_value] = group
         ax.plot(group[time_col], group[value_col], label=str(path_value))
 
     if mark_time is not None:
@@ -382,6 +397,28 @@ def plot_timeseries_by_path4(df, value_col="value", time_col="value_time_stamp_c
         for mt, ml in zip(mark_times, mark_labels):
             mt = pd.to_datetime(mt)
             ax.axvline(mt, color="black", linestyle="--", linewidth=1.5, label=ml or str(mt))
+
+            window_start = mt - pd.Timedelta(minutes=dip_window_minutes)
+            dip_amps = {}
+            for path_value, group in groups.items():
+                window = group[(group[time_col] >= window_start) & (group[time_col] < mt)]
+                if window.empty:
+                    continue
+                dip_amps[path_value] = float(window[value_col].max() - window[value_col].min())
+
+            if not dip_amps:
+                print(f"[{mt}] no data found in the {dip_window_minutes}-minute window before mark time.")
+                continue
+
+            detected_phase = max(dip_amps, key=dip_amps.get)
+            detected_amp = dip_amps[detected_phase]
+            if expected_phase is not None:
+                expected_amp = dip_amps.get(expected_phase, 0.0)
+                amp_diff = detected_amp - expected_amp
+                print(f"[{mt}] phase with most significant dip: {detected_phase} (amp={detected_amp:.4f}) | "
+                      f"expected phase: {expected_phase} (amp={expected_amp:.4f}) | diff={amp_diff:.4f}")
+            else:
+                print(f"[{mt}] phase with most significant dip: {detected_phase} (amp={detected_amp:.4f})")
 
     ax.set_xlabel("Time")
     ax.set_ylabel("Value")
