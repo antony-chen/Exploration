@@ -336,6 +336,17 @@ def plot_etth_weekly_features(times, HUFL, HULL, MUFL, MULL, LUFL, LULL, OT, wee
     plt.show()
 
 
+def _phase_letter(path4_value):
+    """
+    Extract the trailing phase letter (A/B/C) from a path4 string such as
+    "Amps1A" -> "A". Falls back to the upper-cased raw value if no trailing
+    A/B/C letter is found, so plain "A"/"B"/"C" values still work.
+    """
+    s = str(path4_value).strip()
+    match = re.search(r"([ABC])$", s, re.IGNORECASE)
+    return match.group(1).upper() if match else s.upper()
+
+
 def plot_timeseries_by_path4(df, value_col="value", time_col="value_time_stamp_cst",
                               path_col="path4", mark_time=None, mark_label=None,
                               expected_phase=None, dip_window_minutes=10,
@@ -344,10 +355,18 @@ def plot_timeseries_by_path4(df, value_col="value", time_col="value_time_stamp_c
     Plot one line per unique `path_col` value (e.g. 3 timeseries) on a single
     graph, with `time_col` on the x-axis and `value_col` on the y-axis.
 
-    For each `mark_time`, also inspects the `dip_window_minutes` immediately
-    preceding it and reports (via print) which phase shows the most
-    significant dip (peak-to-trough amplitude) in that window, compared
-    against `expected_phase`.
+    For each `mark_time`, inspects the `dip_window_minutes` immediately
+    preceding it and determines which phase shows the most significant dip
+    (peak-to-trough amplitude) in that window. `path_col` values may be
+    formatted like "Amps1A" rather than plain "A"/"B"/"C" — the trailing
+    phase letter is extracted for comparison against `expected_phase`.
+
+    If `expected_phase` is given, the plot is only drawn and the dip is only
+    printed to the console when the detected phase differs from
+    `expected_phase` (i.e. only anomalies are surfaced). If no `mark_time`
+    produces such a mismatch, nothing is plotted or printed and this
+    function returns None. If `expected_phase` is not given, every
+    `mark_time` is reported unconditionally (no anomaly filtering).
 
     Parameters
     ----------
@@ -362,9 +381,8 @@ def plot_timeseries_by_path4(df, value_col="value", time_col="value_time_stamp_c
         Label(s) for the marked timestamp(s). Defaults to the timestamp
         itself if not provided.
     expected_phase : optional
-        The `path_col` value expected to show the dip before `mark_time`.
-        Its dip amplitude is compared against whichever phase actually
-        shows the most significant dip.
+        The phase (e.g. "A", or "Amps1A") expected to show the dip before
+        `mark_time`. Only the trailing letter is used for comparison.
     dip_window_minutes : float
         Length of the look-back window (in minutes) before each `mark_time`
         used to detect the dip.
@@ -377,48 +395,87 @@ def plot_timeseries_by_path4(df, value_col="value", time_col="value_time_stamp_c
 
     Returns
     -------
-    matplotlib.axes.Axes
+    matplotlib.axes.Axes or None
+        None when `expected_phase` is given and no mark_time shows a
+        mismatch (nothing plotted or printed in that case).
     """
     df = df.copy()
     df[time_col] = pd.to_datetime(df[time_col])
 
+    groups = {path_value: group.sort_values(time_col)
+              for path_value, group in df.groupby(path_col)}
+
+    if mark_time is None:
+        if ax is None:
+            _, ax = plt.subplots(figsize=figsize)
+        for path_value, group in groups.items():
+            ax.plot(group[time_col], group[value_col], label=str(path_value))
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Value")
+        ax.legend(title=path_col)
+        ax.grid(alpha=0.3)
+        if title:
+            ax.set_title(title)
+        plt.tight_layout()
+        return ax
+
+    mark_times = mark_time if isinstance(mark_time, (list, tuple)) else [mark_time]
+    mark_labels = mark_label if isinstance(mark_label, (list, tuple)) else [mark_label] * len(mark_times)
+    expected_letter = _phase_letter(expected_phase) if expected_phase is not None else None
+
+    events = []
+    for mt, ml in zip(mark_times, mark_labels):
+        mt = pd.to_datetime(mt)
+        window_start = mt - pd.Timedelta(minutes=dip_window_minutes)
+
+        dip_amps = {}
+        for path_value, group in groups.items():
+            window = group[(group[time_col] >= window_start) & (group[time_col] < mt)]
+            if window.empty:
+                continue
+            dip_amps[path_value] = float(window[value_col].max() - window[value_col].min())
+
+        if not dip_amps:
+            continue
+
+        detected_phase = max(dip_amps, key=dip_amps.get)
+        detected_amp = dip_amps[detected_phase]
+        detected_letter = _phase_letter(detected_phase)
+
+        if expected_letter is not None and detected_letter == expected_letter:
+            continue  # matches expectation: not an anomaly, nothing to report
+
+        expected_amp = next(
+            (amp for path_value, amp in dip_amps.items() if _phase_letter(path_value) == expected_letter),
+            0.0,
+        )
+        events.append({
+            "mark_time": mt,
+            "mark_label": ml,
+            "detected_phase": detected_phase,
+            "detected_amp": detected_amp,
+            "expected_amp": expected_amp,
+        })
+
+    if not events:
+        return None
+
     if ax is None:
         _, ax = plt.subplots(figsize=figsize)
-
-    groups = {}
-    for path_value, group in df.groupby(path_col):
-        group = group.sort_values(time_col)
-        groups[path_value] = group
+    for path_value, group in groups.items():
         ax.plot(group[time_col], group[value_col], label=str(path_value))
 
-    if mark_time is not None:
-        mark_times = mark_time if isinstance(mark_time, (list, tuple)) else [mark_time]
-        mark_labels = mark_label if isinstance(mark_label, (list, tuple)) else [mark_label] * len(mark_times)
-        for mt, ml in zip(mark_times, mark_labels):
-            mt = pd.to_datetime(mt)
-            ax.axvline(mt, color="black", linestyle="--", linewidth=1.5, label=ml or str(mt))
-
-            window_start = mt - pd.Timedelta(minutes=dip_window_minutes)
-            dip_amps = {}
-            for path_value, group in groups.items():
-                window = group[(group[time_col] >= window_start) & (group[time_col] < mt)]
-                if window.empty:
-                    continue
-                dip_amps[path_value] = float(window[value_col].max() - window[value_col].min())
-
-            if not dip_amps:
-                print(f"[{mt}] no data found in the {dip_window_minutes}-minute window before mark time.")
-                continue
-
-            detected_phase = max(dip_amps, key=dip_amps.get)
-            detected_amp = dip_amps[detected_phase]
-            if expected_phase is not None:
-                expected_amp = dip_amps.get(expected_phase, 0.0)
-                amp_diff = detected_amp - expected_amp
-                print(f"[{mt}] phase with most significant dip: {detected_phase} (amp={detected_amp:.4f}) | "
-                      f"expected phase: {expected_phase} (amp={expected_amp:.4f}) | diff={amp_diff:.4f}")
-            else:
-                print(f"[{mt}] phase with most significant dip: {detected_phase} (amp={detected_amp:.4f})")
+    for ev in events:
+        ax.axvline(ev["mark_time"], color="black", linestyle="--", linewidth=1.5,
+                   label=ev["mark_label"] or str(ev["mark_time"]))
+        if expected_phase is not None:
+            amp_diff = ev["detected_amp"] - ev["expected_amp"]
+            print(f"[{ev['mark_time']}] phase with most significant dip: {ev['detected_phase']} "
+                  f"(amp={ev['detected_amp']:.4f}) | expected phase: {expected_phase} "
+                  f"(amp={ev['expected_amp']:.4f}) | diff={amp_diff:.4f}")
+        else:
+            print(f"[{ev['mark_time']}] phase with most significant dip: "
+                  f"{ev['detected_phase']} (amp={ev['detected_amp']:.4f})")
 
     ax.set_xlabel("Time")
     ax.set_ylabel("Value")
