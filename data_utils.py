@@ -350,6 +350,7 @@ def _phase_letter(path4_value):
 def plot_timeseries_by_path4(df, value_col="value", time_col="value_time_stamp_cst",
                               path_col="path4", mark_time=None, mark_label=None,
                               expected_phase=None, dip_window_minutes=10,
+                              feeder_name=None, csv_path=None,
                               ax=None, figsize=(12, 6), title=None):
     """
     Plot one line per unique `path_col` value (e.g. 3 timeseries) on a single
@@ -367,6 +368,12 @@ def plot_timeseries_by_path4(df, value_col="value", time_col="value_time_stamp_c
     produces such a mismatch, nothing is plotted or printed and this
     function returns None. If `expected_phase` is not given, every
     `mark_time` is reported unconditionally (no anomaly filtering).
+
+    When an anomaly is found and `csv_path` is given, a row is appended to
+    that CSV (created with a header if it doesn't exist yet) recording
+    `feeder_name`, `expected_phase`, the actual phase that dropped, the
+    `mark_time` that was passed in, and the most significant dip's amplitude
+    difference vs. the expected phase's dip amplitude.
 
     Parameters
     ----------
@@ -386,6 +393,13 @@ def plot_timeseries_by_path4(df, value_col="value", time_col="value_time_stamp_c
     dip_window_minutes : float
         Length of the look-back window (in minutes) before each `mark_time`
         used to detect the dip.
+    feeder_name : optional
+        Feeder identifier recorded in the CSV log row (not derived from
+        `df`, since it isn't one of its columns).
+    csv_path : str or Path, optional
+        Path to a CSV log file. A row is appended for each detected
+        unexpected phase drop; the file (with header) is created if it
+        doesn't already exist.
     ax : matplotlib.axes.Axes, optional
         Axes to draw on. A new figure/axes is created if not provided.
     figsize : tuple
@@ -473,6 +487,16 @@ def plot_timeseries_by_path4(df, value_col="value", time_col="value_time_stamp_c
             print(f"[{ev['mark_time']}] phase with most significant dip: {ev['detected_phase']} "
                   f"(amp={ev['detected_amp']:.4f}) | expected phase: {expected_phase} "
                   f"(amp={ev['expected_amp']:.4f}) | diff={amp_diff:.4f}")
+
+            if csv_path is not None:
+                row = pd.DataFrame([{
+                    "feeder_name": feeder_name,
+                    "expected_phase": expected_phase,
+                    "actual_phase": ev["detected_phase"],
+                    "timestamp": ev["mark_time"],
+                    "amp_diff": amp_diff,
+                }])
+                row.to_csv(csv_path, mode="a", header=not os.path.exists(csv_path), index=False)
         else:
             print(f"[{ev['mark_time']}] phase with most significant dip: "
                   f"{ev['detected_phase']} (amp={ev['detected_amp']:.4f})")
