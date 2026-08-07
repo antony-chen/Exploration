@@ -512,6 +512,57 @@ def plot_timeseries_by_path4(df, value_col="value", time_col="value_time_stamp_c
     return ax
 
 
+def analyze_phase_mismatches(df, feeder_col="feeder_name", expected_col="expected_phase",
+                              actual_col="actual_phase", amp_diff_col="amp_diff", top_n=None):
+    """
+    Summarize repeated phase mismatches per feeder from logs produced by
+    `plot_timeseries_by_path4`'s `csv_path` output (one combined DataFrame
+    formed by concatenating one or more of those CSV files).
+
+    Groups rows by (feeder, expected_phase, actual_phase) and ranks the
+    combinations by how often each one occurred, so the most common
+    expected-vs-actual phase mismatches on the same feeder surface first.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Concatenation of one or more CSV logs written by
+        `plot_timeseries_by_path4` (columns: feeder_name, expected_phase,
+        actual_phase, timestamp, amp_diff).
+    feeder_col, expected_col, actual_col, amp_diff_col : str
+        Column names in `df`.
+    top_n : int, optional
+        If given, only the top_n most frequent mismatches are kept
+        (and printed).
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per (feeder, expected_phase, actual_phase) combination,
+        sorted by occurrence count (descending), with columns:
+        [feeder_col, expected_col, actual_col, "occurrences",
+         "avg_amp_diff", "max_amp_diff"].
+    """
+    summary = (
+        df.groupby([feeder_col, expected_col, actual_col])[amp_diff_col]
+        .agg(occurrences="count", avg_amp_diff="mean", max_amp_diff="max")
+        .reset_index()
+        .sort_values("occurrences", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    if top_n is not None:
+        summary = summary.head(top_n)
+
+    print(f"Top {len(summary)} phase mismatch(es) by occurrence:")
+    for rank, (_, row) in enumerate(summary.iterrows(), start=1):
+        print(f"{rank}. feeder={row[feeder_col]} | expected={row[expected_col]} -> "
+              f"actual={row[actual_col]} | occurrences={int(row['occurrences'])} | "
+              f"avg_amp_diff={row['avg_amp_diff']:.4f} | max_amp_diff={row['max_amp_diff']:.4f}")
+
+    return summary
+
+
 # def plot_data(times, energy, temp, workday, season_feat,
 #                    alpha=0.5, lw=1.0, cmap="viridis"):
 #     """
