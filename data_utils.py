@@ -1739,6 +1739,47 @@ def combine_oncor_transformers(transformer_ids, out_path="processed_data/weeks_t
              time_index=time_index_all, time_index_str=time_index_str_all)
     print(f"Combined data saved to {out_path}")
 
+def _resolve_oncor_project_root() -> Path:
+    """Shared by get_data_oncor_load_weekly and discover_available_xfmr_ids."""
+    # Prefer an explicit project root. Otherwise search upward so this package
+    # also works when it is placed inside a wrapper folder under M2oE2_For_Zhe.
+    configured_root = os.environ.get("ONCOR_PROJECT_ROOT", "").strip()
+    if configured_root:
+        return Path(configured_root).expanduser().resolve()
+    here = Path(__file__).resolve()
+    candidates = [here.parent, *here.parents]
+    return next(
+        (p for p in candidates if (p / "processed_data").is_dir()),
+        here.parent.parent,
+    )
+
+
+def discover_available_xfmr_ids(project_root: Optional[Path] = None) -> List[str]:
+    """List the transformer IDs with their own per-device NPZ under processed_data/.
+
+    Each entry is a real device ID you can pass via ONCOR_XFMR_IDS (comma-separated)
+    to train/plot with real device names instead of the synthetic 'profile_0',
+    'profile_1', ... labels split_merged_profiles() assigns when ONCOR_XFMR_IDS is
+    left empty and profiles are auto-split out of the merged weeks_tensor_all.npz.
+
+    project_root: defaults to the same resolution get_data_oncor_load_weekly() uses
+    (ONCOR_PROJECT_ROOT env var, or searching upward for a 'processed_data' dir).
+    """
+    root = Path(project_root) if project_root is not None else _resolve_oncor_project_root()
+    processed_dir = root / "processed_data"
+    if not processed_dir.is_dir():
+        raise FileNotFoundError(
+            f"processed_data directory not found under {root}. "
+            "Set ONCOR_PROJECT_ROOT to the M2oE2_For_Zhe directory."
+        )
+    ids = [
+        p.stem[len("weeks_tensor_"):]
+        for p in processed_dir.glob("weeks_tensor_*.npz")
+        if p.stem != "weeks_tensor_all"
+    ]
+    return sorted(ids)
+
+
 def get_data_oncor_load_weekly(XFMR="all"):
     """Load weekly ONCOR data and construct calendar features correctly.
 
@@ -1757,18 +1798,7 @@ def get_data_oncor_load_weekly(XFMR="all"):
     Calendar variables are always rebuilt from timestamps; they are never
     mapped from humidity or heat-index columns.
     """
-    # Prefer an explicit project root. Otherwise search upward so this package
-    # also works when it is placed inside a wrapper folder under M2oE2_For_Zhe.
-    configured_root = os.environ.get("ONCOR_PROJECT_ROOT", "").strip()
-    if configured_root:
-        project_root = Path(configured_root).expanduser().resolve()
-    else:
-        here = Path(__file__).resolve()
-        candidates = [here.parent, *here.parents]
-        project_root = next(
-            (p for p in candidates if (p / "processed_data").is_dir()),
-            here.parent.parent,
-        )
+    project_root = _resolve_oncor_project_root()
 
     if XFMR == "all":
         fpath = project_root / "processed_data" / "weeks_tensor_all.npz"
