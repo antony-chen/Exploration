@@ -13,6 +13,7 @@ import matplotlib.dates as mdates
 import numpy as np
 import pandas as pd
 import re, os
+import itertools
 from typing import Optional, List, Tuple
 
 
@@ -561,6 +562,130 @@ def analyze_phase_mismatches(df, feeder_col="feeder_name", expected_col="expecte
               f"avg_amp_diff={row['avg_amp_diff']:.4f} | max_amp_diff={row['max_amp_diff']:.4f}")
 
     return summary
+
+
+def _device_phase_frame(df, device_value, device_col, path_col, time_col, value_col):
+    """Wide, time-indexed frame of one device's phases: columns are phase letters (A/B/C)."""
+    dev_df = df[df[device_col] == device_value].copy()
+    dev_df["_phase"] = dev_df[path_col].map(_phase_letter)
+    return dev_df.pivot_table(index=time_col, columns="_phase", values=value_col, aggfunc="mean")
+
+
+def analyze_correlations(df, device_col="device", value_col="value",
+                          time_col="value_time_stamp_cst", path_col="path4",
+                          confusing_corr_threshold=0.5):
+    """
+    For every pair of devices in `df`, correlate each phase's timeseries
+    against every phase's timeseries of the other device (aligned on shared
+    timestamps), then sort the pairing into one of three categories:
+
+      - "matched": every phase's best correlation is with the same-letter
+        phase on the other device (a full A<->A, B<->B, C<->C one-to-one
+        mapping), and every best correlation meets `confusing_corr_threshold`.
+      - "mismatched": a full one-to-one mapping between the two devices'
+        phases exists and meets the threshold, but it doesn't line up by
+        phase letter (e.g. device A's "A" phase best matches device B's
+        "C" phase).
+      - "confusing": anything that doesn't cleanly fit either category —
+        multiple phases on one device best-correlate with the same phase
+        on the other device (non one-to-one), the best correlation for any
+        phase is below `confusing_corr_threshold`, or either device is
+        missing one of phases A/B/C.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Long-format frame with columns [device_col, path_col, time_col,
+        value_col]. `path_col` values may be formatted like "Amps1A" (only
+        the trailing phase letter is used, via `_phase_letter`).
+    device_col : str
+        Column identifying the device (e.g. feeder) each row belongs to.
+    value_col, time_col, path_col : str
+        As in `plot_timeseries_by_path4`.
+    confusing_corr_threshold : float
+        Minimum acceptable best correlation per phase; pairs where any
+        phase's best correlation falls below this are "confusing".
+
+    Returns
+    -------
+    dict[str, list[dict]]
+        {"matched": [...], "mismatched": [...], "confusing": [...]}. Each
+        entry has "device_a", "device_b", "correlation_matrix" (phase x
+        phase pd.DataFrame of Pearson correlations, or None if a phase was
+        missing), and "phase_mapping" (dict of device_a phase -> best
+        matching device_b phase, or None). "confusing" entries also include
+        "reason".
+    """
+    df = df.copy()
+    df[time_col] = pd.to_datetime(df[time_col])
+
+    devices = sorted(df[device_col].dropna().unique(), key=str)
+    device_frames = {
+        dev: _device_phase_frame(df, dev, device_col, path_col, time_col, value_col)
+        for dev in devices
+    }
+
+    expected_phases = ["A", "B", "C"]
+    results = {"matched": [], "mismatched": [], "confusing": []}
+
+    for device_a, device_b in itertools.combinations(devices, 2):
+        frame_a = device_frames[device_a]
+        frame_b = device_frames[device_b]
+
+        missing = sorted((set(expected_phases) - set(frame_a.columns))
+                          | (set(expected_phases) - set(frame_b.columns)))
+        if missing:
+            results["confusing"].append({
+                "device_a": device_a, "device_b": device_b,
+                "correlation_matrix": None, "phase_mapping": None,
+                "reason": f"missing phase(s): {missing}",
+            })
+            continue
+
+        merged = frame_a.join(frame_b, how="inner", lsuffix="_a", rsuffix="_b")
+        if merged.empty:
+            results["confusing"].append({
+                "device_a": device_a, "device_b": device_b,
+                "correlation_matrix": None, "phase_mapping": None,
+                "reason": "no overlapping timestamps",
+            })
+            continue
+
+        corr = pd.DataFrame(index=expected_phases, columns=expected_phases, dtype=float)
+        for pa in expected_phases:
+            for pb in expected_phases:
+                corr.loc[pa, pb] = merged[f"{pa}_a"].corr(merged[f"{pb}_b"])
+        corr = corr.fillna(-1.0)  # treat undefined (e.g. constant series) correlation as no match
+
+        best_match = corr.idxmax(axis=1)
+        best_corr = corr.max(axis=1)
+        mapping = best_match.to_dict()
+
+        reasons = []
+        below_threshold = best_corr[best_corr < confusing_corr_threshold].index.tolist()
+        if below_threshold:
+            reasons.append(f"max correlation below {confusing_corr_threshold} for phase(s): {below_threshold}")
+        if len(set(mapping.values())) != len(mapping):
+            reasons.append("non one-to-one phase mapping (multiple phases mapped to the same phase)")
+
+        entry = {
+            "device_a": device_a, "device_b": device_b,
+            "correlation_matrix": corr, "phase_mapping": mapping,
+        }
+        if reasons:
+            entry["reason"] = "; ".join(reasons)
+            results["confusing"].append(entry)
+        elif all(pa == pb for pa, pb in mapping.items()):
+            results["matched"].append(entry)
+        else:
+            results["mismatched"].append(entry)
+
+    n_pairs = len(devices) * (len(devices) - 1) // 2
+    print(f"Analyzed {len(devices)} device(s), {n_pairs} pairing(s): "
+          f"matched={len(results['matched'])}, mismatched={len(results['mismatched'])}, "
+          f"confusing={len(results['confusing'])}")
+
+    return results
 
 
 # def plot_data(times, energy, temp, workday, season_feat,
