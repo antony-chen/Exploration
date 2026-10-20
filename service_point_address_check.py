@@ -32,7 +32,7 @@ def summarize(g):
 def check_service_points(df, sp_col="service_point_id", addr_col="address", max_gap=10):
     df = df.copy()
     df[["street_num", "street_name"]] = df[addr_col].apply(parse_address)
-    out = df.groupby(sp_col).apply(summarize, include_groups=False)
+    out = df.groupby(sp_col)[["street_num", "street_name"]].apply(summarize)
     out = out[out["n_addresses"] > 1]                                   # multi-address SPs only
     out["same_street"] = out["n_streets"] == 1
     out["numbers_close"] = out["max_gap"] <= max_gap
