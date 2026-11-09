@@ -17,6 +17,17 @@ def parse_address(addr):
     words = [SUFFIXES.get(w, DIRS.get(w, w)) for w in m.group(2).split()]
     return pd.Series([int(m.group(1)), " ".join(words)])
 
+def is_truncated_variant(streets):
+    """True if every street name is a word-prefix of the longest one, e.g. 'MARTIN' / 'MARTIN LUTHER KING BLVD'.
+    The shared prefix must include a real word, so a lone 'N' doesn't match 'N MAIN ST'."""
+    if len(streets) < 2:
+        return False
+    words = [s.split() for s in streets]
+    longest = max(words, key=len)
+    shortest = min(words, key=len)
+    return (all(longest[:len(w)] == w for w in words)
+            and any(w not in DIRS.values() for w in shortest))
+
 def summarize(g):
     streets = g["street_name"].dropna().astype(str).unique()
     nums = g["street_num"].dropna().astype(int).sort_values().unique()
@@ -26,6 +37,7 @@ def summarize(g):
         "n_missing":      g["street_name"].isna().sum(),
         "n_streets":      len(streets),
         "streets":        "; ".join(sorted(streets)),
+        "truncated_street": is_truncated_variant(streets),
         "min_num":        nums.min() if len(nums) else pd.NA,
         "max_num":        nums.max() if len(nums) else pd.NA,
         "span":           nums.max() - nums.min() if len(nums) else pd.NA,
@@ -46,17 +58,24 @@ def check_service_points(df, sp_col="service_point_id", addr_col="address", max_
     out.loc[out.same_street & out.numbers_close, "verdict"] = "LIKELY SAME PROPERTY"
     out.loc[~out.same_street, "verdict"] = "DIFFERENT STREETS (corner lot?)"
     out.loc[out.same_street & ~out.numbers_close, "verdict"] = "SAME STREET, FAR APART"
+    out.loc[out.truncated_street & out.numbers_close, "verdict"] = "POSSIBLE SAME PROPERTY (truncated street name)"
+    out.loc[out.truncated_street & ~out.numbers_close, "verdict"] = "TRUNCATED STREET, FAR APART"
     out.loc[out.n_addresses - out.n_missing < 2, "verdict"] = "MISSING ADDRESS"  # <2 usable addresses to compare
     return df, out.sort_values(["verdict", "n_addresses"], ascending=[True, False])
 
 if __name__ == "__main__":
     df = pd.DataFrame({
-        "service_point_id": ["SP1","SP1","SP1","SP2","SP2","SP3","SP3","SP4","SP1","SP5","SP5"],
+        "service_point_id": ["SP1","SP1","SP1","SP2","SP2","SP3","SP3","SP4","SP1","SP5","SP5",
+                             "SP6","SP6","SP6","SP7","SP7","SP8","SP8","SP9","SP9"],
         "address": ["101 Main Street", "103 Main St.", "105-B MAIN ST Apt 2",
                     "200 Oak Ave", "450 Oak Avenue",
                     "12 Elm St", "300 N Pine Rd",
                     "9 Birch Ln",
-                    None, float("nan"), "  "],
+                    None, float("nan"), "  ",
+                    "10 Martin Luther King Blvd", "12 Martin", "14 Martin Luther",  # truncated, close
+                    "20 Main St", "22 Maple Ave",                                   # different first word
+                    "5 N Main St", "7 N",                                           # only a direction left
+                    "30 Cedar St", "200 Cedar"],                                    # truncated, far apart
     })
     parsed, report = check_service_points(df)
     pd.set_option("display.width", 200); pd.set_option("display.max_columns", 20)
